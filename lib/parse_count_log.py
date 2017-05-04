@@ -56,13 +56,13 @@ class ParseCountReport(object):
 	def __init__(self, file_path, changelist):
 		self.file_path = file_path
 		self.changelist = changelist
+		self.node_list = []
 
 	def parse(self):
 		with open(self.file_path, 'r') as fp:
 			lines = fp.readlines()
 
 		node = None
-		node_list = []
 		id = 0
 		for l in lines:
 			name_mo = _search_node_name.search(l)
@@ -82,24 +82,24 @@ class ParseCountReport(object):
 				has_duplicate = False
 				
 				# specify parent_child node relationship
-				if node_list:
+				if self.node_list:
 					# find a sub-node
-					if node.spaces > node_list[-1].spaces:
-						node.parent_node = node_list[-1]
-						node_list[-1].child_node.append(node)
+					if node.spaces > self.node_list[-1].spaces:
+						node.parent_node = self.node_list[-1]
+						self.node_list[-1].child_node.append(node)
 					# find a samelevel-node
-					elif node.spaces == node_list[-1].spaces:
-						if node_list[-1].parent_node:
-							node.parent_node = node_list[-1].parent_node
-							node_list[-1].parent_node.child_node.append(node)
+					elif node.spaces == self.node_list[-1].spaces:
+						if self.node_list[-1].parent_node:
+							node.parent_node = self.node_list[-1].parent_node
+							self.node_list[-1].parent_node.child_node.append(node)
 					# find upper-level node summary and exclude root node
 					# elif node.spaces < node_list[-1].spaces and node.spaces != 0:
-					elif node.spaces < node_list[-1].spaces:
-						has_duplicate, duplicate_node = find_duplicate(node, node_list)
+					elif node.spaces < self.node_list[-1].spaces:
+						has_duplicate, duplicate_node = findDuplicate(node, self.node_list)
 						node = duplicate_node
-						node_list.remove(duplicate_node)
+						self.node_list.remove(duplicate_node)
 
-				node_list.append(node)
+				self.node_list.append(node)
 				low_details = dict()
 				id += 1
 			elif node and not has_duplicate:
@@ -115,54 +115,54 @@ class ParseCountReport(object):
 						low_details[s]['average'] = api_usage_mo.group(2)
 						low_details[s]['total'] = api_usage_mo.group(3)
 
-		get_pid(node_list)
+		self.getPid()
 
-		get_high_usage(node_list)
+		self.getHighUsage()
 
-		return node_list
+		return self.node_list
 
+	# Allocate node pid
+	def getPid(self):
+		values = sorted(set(map(lambda x : x.spaces, self.node_list)))
+		group_node_list = [[y for y in self.node_list if y.spaces==x] for x in values]
 
-# Find node pid
-def get_pid(node_list):
-	values = sorted(set(map(lambda x : x.spaces, node_list)))
-	group_node_list = [[y for y in node_list if y.spaces==x] for x in values]
+		temp_pid = 0
+		for ng in group_node_list:
+			for n in ng:
+				n.pid = temp_pid
+			temp_pid += 1
 
-	temp_pid = 0
-	for ng in group_node_list:
-		for n in ng:
-			n.pid = temp_pid
-		temp_pid += 1
+	# Get high level operator usages
+	def getHighUsage(self):
+		for node in self.node_list:
+			prefix = os.getenv('DLB_COUNT_HIGHLEVEL_PREFIX')
+			high_details = dict()
+			sum = 0
+			for n in node.child_node:
+				if n.name.startswith(prefix):
+					name = n.name[len(prefix):]
+					high_details[name] = dict()
+					high_details[name]['average'] = None
+					high_details[name]['total'] = n.loop_times
+					sum += int(n.loop_times)
+			
+			high_summary = _SUMMARY(None, sum)
 
-# Obtain high-leval api usages
-def get_high_usage(node_list):
-	for node in node_list:
-		prefix = os.getenv('DLB_COUNT_HIGHLEVEL_PREFIX')
-		high_details = dict()
-		sum = 0
-		for n in node.child_node:
-			if n.name.startswith(prefix):
-				name = n.name[len(prefix):]
-				high_details[name] = dict()
-				high_details[name]['average'] = None
-				high_details[name]['total'] = n.loop_times
-				sum += int(n.loop_times)
+			if sum != 0:
+				node.high_usage = _API_USAGE(high_summary, high_details)
+
+	# Find duplicate node
+	def findDuplicate(node):
+		target_node = None
+		duplicate = False
+		for x in reversed(self.node_list):
+			if node.name == x.name:
+				target_node = x
+				duplicate = True
+				break
 		
-		high_summary = _SUMMARY(None, sum)
+		return (duplicate, target_node)
 
-		if sum != 0:
-			node.high_usage = _API_USAGE(high_summary, high_details)
-
-# Find Duplicate Node
-def find_duplicate(node, node_list):
-	target_node = None
-	duplicate = False
-	for x in reversed(node_list):
-		if node.name == x.name:
-			target_node = x
-			duplicate = True
-			break
-	
-	return (duplicate, target_node)
 
 # Convert CountNode to dataframe
 def NodetoDF(node_list):
