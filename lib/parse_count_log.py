@@ -30,7 +30,7 @@ _SUMMARY = namedtuple('SUMMARY', ('average', 'total'))
 class CountNode(object):
 
 	"""
-	This class wraps all useful infos on one function into one node
+	This class wraps all infos in count_report.log into one CountNode Object
 	"""
 
 	def __init__(self, **kwargs):
