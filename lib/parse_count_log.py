@@ -50,7 +50,7 @@ class CountNode(object):
 class ParseCountReport(object):
 
 	"""
-	This class is used to extrac data from dlb_count report and covert them to dataframe
+	This class is used to extrac data from single dlb_count report and covert them to dataframe
 	"""
 
 	def __init__(self, file_path, changelist):
@@ -58,6 +58,7 @@ class ParseCountReport(object):
 		self.changelist = changelist
 		self.node_list = []
 
+	# Parse single count report log
 	def parse(self):
 		with open(self.file_path, 'r') as fp:
 			lines = fp.readlines()
@@ -95,7 +96,7 @@ class ParseCountReport(object):
 					# find upper-level node summary and exclude root node
 					# elif node.spaces < node_list[-1].spaces and node.spaces != 0:
 					elif node.spaces < self.node_list[-1].spaces:
-						has_duplicate, duplicate_node = findDuplicate(node, self.node_list)
+						has_duplicate, duplicate_node = self.findDuplicate(node)
 						node = duplicate_node
 						self.node_list.remove(duplicate_node)
 
@@ -119,8 +120,6 @@ class ParseCountReport(object):
 
 		self.getHighUsage()
 
-		return self.node_list
-
 	# Allocate node pid
 	def getPid(self):
 		values = sorted(set(map(lambda x : x.spaces, self.node_list)))
@@ -132,7 +131,7 @@ class ParseCountReport(object):
 				n.pid = temp_pid
 			temp_pid += 1
 
-	# Get high level operator usages
+	# Get high level operator usages for all nodes
 	def getHighUsage(self):
 		for node in self.node_list:
 			prefix = os.getenv('DLB_COUNT_HIGHLEVEL_PREFIX')
@@ -152,7 +151,7 @@ class ParseCountReport(object):
 				node.high_usage = _API_USAGE(high_summary, high_details)
 
 	# Find duplicate node
-	def findDuplicate(node):
+	def findDuplicate(self, node):
 		target_node = None
 		duplicate = False
 		for x in reversed(self.node_list):
@@ -163,90 +162,75 @@ class ParseCountReport(object):
 		
 		return (duplicate, target_node)
 
-
-# Convert CountNode to dataframe
-def NodetoDF(node_list):
-	ListofRows = []
-	for node in node_list:
-		node_dict = {
-					'id'          :    node.node_id,
-					'name'        :    node.name,
-					'loop_times'  :    node.loop_times,
-					'low_usage'   :    node.low_usage,
-					'high_usage'  :    node.high_usage,
-					'parent_node' :    node.parent_node,
-					'child_node'  :    node.child_node,
-					'pid'         :    node.pid,
-					'changelist'  :    node.changelist
+	# Get total usage of low/high level operators within single cound report
+	# in dataframe format. columns=['high/low_level_api', 'total', 'changelist']
+	def getUsage(self, api_type):
+		mapping = {
+						'low_usage' : 'low_level_api',
+						'high_usage' : 'high_level_api'
 		}
-		ListofRows.append(node_dict)
 
-	df = pd.DataFrame.from_records(ListofRows, \
-		columns=['id', 'name', 'loop_times', 'low_usage', 'high_usage', 'parent_node', 'child_node', 'pid', 'changelist'])
+		df_all = pd.DataFrame()
+		for node in self.node_list:
+			attr = getattr(node, api_type)
+			if attr:
+				for key,value in attr.details.items():
+					df = pd.DataFrame([key], columns=[mapping[api_type]])
+					df = df.join(pd.DataFrame([int(value['total'])], columns=['total']))
+					df = df.join(pd.DataFrame([self.changelist], columns=['changelist']))
+					df_all = df_all.append(df)
 
-	return (df, mergeDF(node_list, 'low_usage'), mergeDF(node_list, 'high_usage'))
+		if not df_all.empty:
+			# Group record with same api names
+			df_all = df_all.groupby([mapping[api_type], 'changelist'], as_index=False).sum()
+			# Sort in ascent
+			df_all = df_all.sort_values(by=['total'], ascending=[False])			
 
-# Convert Node_List to json object
-def NodetoJSON(root_node):
-	d = dict()
-	d['name'] = root_node.name
-	d['id'] = root_node.node_id
-	d['loop_times'] = root_node.loop_times
-	d['low_usage'] = root_node.low_usage
-	d['high_usage'] = root_node.high_usage
-	d['pid'] = root_node.pid
-	d['changelist'] = root_node.changelist
+		return df_all
 
-	if root_node.child_node:
-		d['child_node'] = [NodetoJSON(x) for x in root_node.child_node]
+	# Convert Node_List to json object
+	def NodetoJSON(self, root_node):
+		d = dict()
+		d['name'] = root_node.name
+		d['id'] = root_node.node_id
+		d['loop_times'] = root_node.loop_times
+		d['low_usage'] = root_node.low_usage
+		d['high_usage'] = root_node.high_usage
+		d['pid'] = root_node.pid
+		d['changelist'] = root_node.changelist
 
-	return d
+		if root_node.child_node:
+			d['child_node'] = [NodetoJSON(x) for x in root_node.child_node]
 
-# Obtain total usage of low/high level APIs in dataframe format
-def mergeDF(node_list, api_type):
-	mapping = {'low_usage' : 'low_level_api', 'high_usage' : 'high_level_api'}
-	df_all = pd.DataFrame()
+		return d
 
-	for node in node_list:
-		attr = getattr(node, api_type)
-		if attr:
-			for key,value in attr.details.items():
-				df = pd.DataFrame([key], columns=[mapping[api_type]])
-				df = df.join(pd.DataFrame([int(value['total'])], columns=['total']))
-				# df = df.join(pd.DataFrame([cl], columns=['changelist']))
-				df_all = df_all.append(df)
-
-	if not df_all.empty:
-		# Group record with same api names
-		df_all = df_all.groupby(mapping[api_type], as_index=False).sum()
-		# Sort in ascent
-		df_all = df_all.sort_values(by=['total'], ascending=[False])
-
-	return df_all
 
 # Get total low/high level operator usages under itaf case folder in dataframe format
-def getallDF(path, changelist):
-	report_list = []
+def getUsageTotal(path, changelist):
+	
+	df_low_total = pd.DataFrame()
+	df_high_total = pd.DataFrame()
+	
 	for root, dir, file in os.walk(path):
 		for f in file:
 			if f == 'count_report.log':
-				report_list.append(os.path.join(root, f))
+				fn = os.path.join(root, f)
+				parseObj = ParseCountReport(fn, changelist)
 
-	df_low_total = pd.DataFrame()
-	df_high_total = pd.DataFrame()
+				print 'Parsing %s...' %fn
+				parseObj.parse()
+				
+				print 'Coverting to dataframe ...'
+				df_low = parseObj.getUsage('low_usage')
+				df_high = parseObj.getUsage('high_usage')
 
-	for log in report_list:
-		print 'Parsing %s...' %log
-		node_list = ParseCountReport(log, changelist).parse()
-		df, df_low, df_high = NodetoDF(node_list)
+				df_low_total = df_low_total.append(df_low)
+				df_high_total = df_high_total.append(df_high)
 
-		df_low_total = df_low_total.append(df_low)
-		df_high_total = df_high_total.append(df_high)
-
-	df_low_total = df_low_total.groupby('low_level_api', as_index=False).sum()
+	df_low_total = df_low_total.groupby(['low_level_api', 'changelist'], as_index=False).sum()
 	df_low_total = df_low_total.sort_values(by=['total'], ascending=[False])
 
-	df_high_total = df_high_total.groupby('high_level_api', as_index=False).sum()
+	df_high_total = df_high_total.groupby(['high_level_api', 'changelist'], as_index=False).sum()
 	df_high_total = df_high_total.sort_values(by=['total'], ascending=[False])
 
 	return (df_low_total, df_high_total)
@@ -337,36 +321,52 @@ def getAllHigh(path):
 
 	return highdict
 
-# def main():
+def main():
 
-# 	parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+	parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
 
-# 	parser.add_argument('-d', '--directory',
-# 						dest='directory',
-# 						action='store',
-# 						default='',
-# 						help='Directory storing all count reports you want to parse.'
-# 						)
+	parser.add_argument('-d', '--directory',
+						dest='directory',
+						action='store',
+						default='',
+						help='Directory storing all count reports you want to parse.'
+						)
 
-# 	parser.add_argument('-e', '--email',
-# 						dest='email',
-# 						action='append',
-# 						default=[],
-# 						help='Sending email notification. This could be passed multiple times')
+	parser.add_argument('-e', '--email',
+						dest='email',
+						action='append',
+						default=[],
+						help='Sending email notification. This could be passed multiple times.')
 
-# 	parser.add_argument('--json',
-# 						dest='json',
-# 						action='store_true',
-# 						default=False,
-# 						help='Transfer data to json object and store under current workspace as \
-# 						data_json.txt.'
-# 						)
+	parser.add_argument('--json',
+						dest='json',
+						action='store_true',
+						default=False,
+						help='Transfer data to json object and store under current workspace as \
+						data_json.txt.'
+						)
 
-# 	options = parser.parse_args()
+	parser.add_argument('-c', '--changelist',
+						dest='changelist',
+						action='store',
+						default='',
+						help='Changelist number of code branch being tested.'
+						)
 
-# 	if not options.directory:
-# 		parser.error("No parsing directory specified. The option '-d' is missing.\n \
-# 			Try parse_count_log.py --help for more information")
+	options = parser.parse_args()
+
+	if not options.directory:
+		parser.error("No parsing directory specified. The option '-d' is missing.\n \
+			Try parse_count_log.py --help for more information")
+
+	if not options.changelist:
+		parser.error("No changelist number specified. The option '-c' is missing.\n \
+			Try parse_count_log.py --help for more information")
+
+	dir = options.directory
+	cl = options.changelist
+	print ("Start Parsing DLB Count Reports Under %s".center(78, '#')) %dir
+	df_low_total, df_high_total = getUsageTotal(dir, cl)
 
 # 	logger = logging.getLogger('Parse Count Report')
 # 	logger.setLevel(logging.DEBUG)
@@ -380,265 +380,265 @@ def getAllHigh(path):
 
 if __name__=='__main__':
 
-	# sys.exit(main())
+	sys.exit(main())
 
-	# log = 'count_report.log'
-	# node_list = ParseCountReport(log, 'v4.9_release').parse()
-	# for node in node_list:
-	# 	print (''.center(78, '#'))
-	# 	print "Current node is %s, id is %d, pid is %d, loop %s times" \
-	# 	%(node.name, node.node_id, node.pid, node.loop_times)
+	# # log = 'count_report.log'
+	# # node_list = ParseCountReport(log, 'v4.9_release').parse()
+	# # for node in node_list:
+	# # 	print (''.center(78, '#'))
+	# # 	print "Current node is %s, id is %d, pid is %d, loop %s times" \
+	# # 	%(node.name, node.node_id, node.pid, node.loop_times)
 		
-	# 	print "Low-Level API Usage is ", node.low_usage
+	# # 	print "Low-Level API Usage is ", node.low_usage
 		
-	# 	print "High-Level API Usage is ", node.high_usage
+	# # 	print "High-Level API Usage is ", node.high_usage
 		
-	# 	if node.parent_node:
-	# 		print "Parent node is ", node.parent_node.name
-	# 	else:
-	# 		print "Parent node is None"
+	# # 	if node.parent_node:
+	# # 		print "Parent node is ", node.parent_node.name
+	# # 	else:
+	# # 		print "Parent node is None"
 		
-	# 	print "Child node is ", [x.name for x in node.child_node]
+	# # 	print "Child node is ", [x.name for x in node.child_node]
 	
-	#################### CountNode to json object ####################
-	# json_tree = NodetoJSON(node_list[-1])
+	# #################### CountNode to json object ####################
+	# # json_tree = NodetoJSON(node_list[-1])
 
-	# print json.dumps(json_tree, indent=4)
+	# # print json.dumps(json_tree, indent=4)
 	
-	# #################### CountNode to datafram object ####################
-	# df, df_low, df_high = NodetoDF(node_list)
+	# # #################### CountNode to datafram object ####################
+	# # df, df_low, df_high = NodetoDF(node_list)
 
-	# # Plot Bar Type Usage
-	# fig = tls.make_subplots(rows=2, cols=1, subplot_titles=('Low_Level_Usage', 'High_Level_Usage'))
-	# fig.append_trace({'x' : df_low['low_level_api'], 'y' : df_low['total'], 'type' : 'bar', \
-	# 	'name' : 'Low_Level', 'marker': {"color": "#0F8C79"}}, 1, 1)
-	# fig.append_trace({'x' : df_high['high_level_api'], 'y' : df_high['total'], 'type' : 'bar', \
-	# 	'name' : 'High_Level', 'marker': {"color": "#0066FF"}}, 2, 1)
-	# fig['layout']['xaxis1'].update(title='Low_Level_APIs')
-	# fig['layout']['xaxis2'].update(title='High_Level_APIs')
-	# fig['layout']['yaxis1'].update(title='Total Usage')
-	# fig['layout']['yaxis2'].update(title='Total Usage')
-	# fig['layout'].update(title='Low/High Level APIs Usage in DDP v4.9 GA')
-	# py.plot(fig, filename='usage.html')
+	# # # Plot Bar Type Usage
+	# # fig = tls.make_subplots(rows=2, cols=1, subplot_titles=('Low_Level_Usage', 'High_Level_Usage'))
+	# # fig.append_trace({'x' : df_low['low_level_api'], 'y' : df_low['total'], 'type' : 'bar', \
+	# # 	'name' : 'Low_Level', 'marker': {"color": "#0F8C79"}}, 1, 1)
+	# # fig.append_trace({'x' : df_high['high_level_api'], 'y' : df_high['total'], 'type' : 'bar', \
+	# # 	'name' : 'High_Level', 'marker': {"color": "#0066FF"}}, 2, 1)
+	# # fig['layout']['xaxis1'].update(title='Low_Level_APIs')
+	# # fig['layout']['xaxis2'].update(title='High_Level_APIs')
+	# # fig['layout']['yaxis1'].update(title='Total Usage')
+	# # fig['layout']['yaxis2'].update(title='Total Usage')
+	# # fig['layout'].update(title='Low/High Level APIs Usage in DDP v4.9 GA')
+	# # py.plot(fig, filename='usage.html')
 
 
-	#################### CountNode to datafram object (Including Usage Diffs) ####################
-	# log_ref = 'count_report_ref.log'
-	# log_dut = 'count_report_dut.log'
+	# #################### CountNode to datafram object (Including Usage Diffs) ####################
+	# # log_ref = 'count_report_ref.log'
+	# # log_dut = 'count_report_dut.log'
 
-	# node_list_ref = ParseCountReport(log_ref, 'ref_cl').parse()
-	# node_list_dut = ParseCountReport(log_dut, 'dut_cl').parse()
+	# # node_list_ref = ParseCountReport(log_ref, 'ref_cl').parse()
+	# # node_list_dut = ParseCountReport(log_dut, 'dut_cl').parse()
 	
-	# # CountNode to DataFrame format
-	# df_total_ref, df_low_ref, df_high_ref = NodetoDF(node_list_ref)
-	# df_total_dut, df_low_dut, df_high_dut = NodetoDF(node_list_dut)
+	# # # CountNode to DataFrame format
+	# # df_total_ref, df_low_ref, df_high_ref = NodetoDF(node_list_ref)
+	# # df_total_dut, df_low_dut, df_high_dut = NodetoDF(node_list_dut)
 
-	# df_common_low = pd.merge(df_low_ref, df_low_dut, on=['low_level_api', 'total'], how='inner')
-	# df_diff_low_ref = \
-	# df_low_ref[~df_low_ref.low_level_api.isin(df_common_low.low_level_api.values)]
-	# df_diff_low_dut = \
-	# df_low_dut[~df_low_dut.low_level_api.isin(df_common_low.low_level_api.values)]
+	# # df_common_low = pd.merge(df_low_ref, df_low_dut, on=['low_level_api', 'total'], how='inner')
+	# # df_diff_low_ref = \
+	# # df_low_ref[~df_low_ref.low_level_api.isin(df_common_low.low_level_api.values)]
+	# # df_diff_low_dut = \
+	# # df_low_dut[~df_low_dut.low_level_api.isin(df_common_low.low_level_api.values)]
 
-	# df_common_high = pd.merge(df_high_ref, df_high_dut, on=['high_level_api', 'total'], \
-	# 	how='inner')
-	# df_diff_high_ref = \
-	# df_high_ref[~df_high_ref.high_level_api.isin(df_common_high.high_level_api.values)]
-	# df_diff_high_dut = \
-	# df_high_dut[~df_high_dut.high_level_api.isin(df_common_high.high_level_api.values)]
+	# # df_common_high = pd.merge(df_high_ref, df_high_dut, on=['high_level_api', 'total'], \
+	# # 	how='inner')
+	# # df_diff_high_ref = \
+	# # df_high_ref[~df_high_ref.high_level_api.isin(df_common_high.high_level_api.values)]
+	# # df_diff_high_dut = \
+	# # df_high_dut[~df_high_dut.high_level_api.isin(df_common_high.high_level_api.values)]
 	
-	# # Plot total low/high level usage and stored in .html format
-	# fig = tls.make_subplots(rows=4, cols=1, subplot_titles=('Low_Level_Usage_Dut_Cl', \
-	# 	'High_Level_Usage_Dut_CL', 'Low_Level_Usage_Diff', 'High_Level_Usage_Diff'))
+	# # # Plot total low/high level usage and stored in .html format
+	# # fig = tls.make_subplots(rows=4, cols=1, subplot_titles=('Low_Level_Usage_Dut_Cl', \
+	# # 	'High_Level_Usage_Dut_CL', 'Low_Level_Usage_Diff', 'High_Level_Usage_Diff'))
 
-	# fig.append_trace({'x' : df_low_dut['low_level_api'], 'y' : df_low_dut['total'], 'type' : \
-	# 	'bar', "marker": {"color": "#0F8C79"}, 'showlegend' : False}, 1, 1)
-	# fig.append_trace({'x' : df_high_dut['high_level_api'], 'y' : df_high_dut['total'], 'type' : \
-	# 	'bar', "marker": {"color": "#0F8C79"}, 'showlegend' : False}, 2, 1)
+	# # fig.append_trace({'x' : df_low_dut['low_level_api'], 'y' : df_low_dut['total'], 'type' : \
+	# # 	'bar', "marker": {"color": "#0F8C79"}, 'showlegend' : False}, 1, 1)
+	# # fig.append_trace({'x' : df_high_dut['high_level_api'], 'y' : df_high_dut['total'], 'type' : \
+	# # 	'bar', "marker": {"color": "#0F8C79"}, 'showlegend' : False}, 2, 1)
 
-	# if not df_diff_low_dut.empty:
-	# 	fig.append_trace({'x' : df_diff_low_dut['low_level_api'], \
-	# 		'y' : df_diff_low_dut['total'], 'type' : 'bar', "marker": {"color": "#0F8C79"}, \
-	# 		'showlegend' : False}, 3, 1)
-	# if not df_diff_low_ref.empty:
-	# 	fig.append_trace({'x' : df_diff_low_ref['low_level_api'], \
-	# 		'y' : df_diff_low_ref['total'], 'type' : 'bar', "marker": {"color": "#BD2D28"}, \
-	# 		'showlegend' : False}, 3, 1)
+	# # if not df_diff_low_dut.empty:
+	# # 	fig.append_trace({'x' : df_diff_low_dut['low_level_api'], \
+	# # 		'y' : df_diff_low_dut['total'], 'type' : 'bar', "marker": {"color": "#0F8C79"}, \
+	# # 		'showlegend' : False}, 3, 1)
+	# # if not df_diff_low_ref.empty:
+	# # 	fig.append_trace({'x' : df_diff_low_ref['low_level_api'], \
+	# # 		'y' : df_diff_low_ref['total'], 'type' : 'bar', "marker": {"color": "#BD2D28"}, \
+	# # 		'showlegend' : False}, 3, 1)
 
-	# if not df_diff_high_dut.empty:
-	# 	fig.append_trace({'x' : df_diff_high_dut['high_level_api'], \
-	# 		'y' : df_diff_high_dut['total'], 'name' : 'dut_cl', 'type' : 'bar', \
-	# 		"marker": {"color": "#0F8C79"}, 'showlegend' : False}, 4, 1)
-	# if not df_diff_high_ref.empty:
-	# 	fig.append_trace({'x' : df_diff_high_ref['high_level_api'], \
-	# 		'y' : df_diff_high_ref['total'], 'name' : 'ref_cl', 'type' : 'bar', \
-	# 		"marker": {"color": "#BD2D28"}, 'showlegend' : False}, 4, 1)
+	# # if not df_diff_high_dut.empty:
+	# # 	fig.append_trace({'x' : df_diff_high_dut['high_level_api'], \
+	# # 		'y' : df_diff_high_dut['total'], 'name' : 'dut_cl', 'type' : 'bar', \
+	# # 		"marker": {"color": "#0F8C79"}, 'showlegend' : False}, 4, 1)
+	# # if not df_diff_high_ref.empty:
+	# # 	fig.append_trace({'x' : df_diff_high_ref['high_level_api'], \
+	# # 		'y' : df_diff_high_ref['total'], 'name' : 'ref_cl', 'type' : 'bar', \
+	# # 		"marker": {"color": "#BD2D28"}, 'showlegend' : False}, 4, 1)
 
-	# fig['layout']['xaxis1'].update(title='Low_Level_APIs')
-	# fig['layout']['xaxis3'].update(title='Low_Level_APIs')
-	# fig['layout']['xaxis2'].update(title='High_Level_APIs')
-	# fig['layout']['xaxis4'].update(title='High_Level_APIs')
-	# fig['layout']['yaxis1'].update(title='Total Usage')
-	# fig['layout']['yaxis2'].update(title='Total Usage')
-	# fig['layout']['yaxis3'].update(title='Total Usage')
-	# fig['layout']['yaxis4'].update(title='Total Usage')
-	# fig['layout'].update(title='Low/High Level APIs Usage in DDP')
+	# # fig['layout']['xaxis1'].update(title='Low_Level_APIs')
+	# # fig['layout']['xaxis3'].update(title='Low_Level_APIs')
+	# # fig['layout']['xaxis2'].update(title='High_Level_APIs')
+	# # fig['layout']['xaxis4'].update(title='High_Level_APIs')
+	# # fig['layout']['yaxis1'].update(title='Total Usage')
+	# # fig['layout']['yaxis2'].update(title='Total Usage')
+	# # fig['layout']['yaxis3'].update(title='Total Usage')
+	# # fig['layout']['yaxis4'].update(title='Total Usage')
+	# # fig['layout'].update(title='Low/High Level APIs Usage in DDP')
 
-	# py.plot(fig, filename='usage.html')
+	# # py.plot(fig, filename='usage.html')
 	
-	################## Generating Total Usage Results ####################
-	white_path = '/home/zxchen/zxchen_temp_workspace/dlb_count'
-	casedict = getAllHigh(white_path)
+	# ################## Generating Total Usage Results ####################
+	# white_path = '/home/zxchen/zxchen_temp_workspace/dlb_count'
+	# casedict = getAllHigh(white_path)
 
-	filename = '/home/zxchen/zxchen_temp_workspace/dlb_count/out.log'
+	# filename = '/home/zxchen/zxchen_temp_workspace/dlb_count/out.log'
 
-	casedict['fft'] = []
-	casedict['dct'] = []
-	casedict['qmf'] = []
+	# casedict['fft'] = []
+	# casedict['dct'] = []
+	# casedict['qmf'] = []
 
-	with open(filename, 'r') as fn:
-		lines = fn.readlines()
+	# with open(filename, 'r') as fn:
+	# 	lines = fn.readlines()
 
-		for l in lines:
-			l = l.strip()
+	# 	for l in lines:
+	# 		l = l.strip()
 
-			mo = _search_node_name.search(l)
-			casename = mo.group(2).split('yyao_')[1]
+	# 		mo = _search_node_name.search(l)
+	# 		casename = mo.group(2).split('yyao_')[1]
 
-			if 'dct' in casename:
-				casedict['dct'].append(casename)
-			elif 'fft' in casename and not casename.startswith('fft'):
-				casedict['fft'].append(casename)
-			elif 'qmf' in casename:
-				casedict['qmf'].append(casename)
+	# 		if 'dct' in casename:
+	# 			casedict['dct'].append(casename)
+	# 		elif 'fft' in casename and not casename.startswith('fft'):
+	# 			casedict['fft'].append(casename)
+	# 		elif 'qmf' in casename:
+	# 			casedict['qmf'].append(casename)
 
-	casedict['fft'] = list(set(casedict['fft']))
-	for x in ['fft_open', 'ifft_open', 'fft_is_ok', 'fft_close', 'ifft_close']:
-		casedict['fft'].append(x)
-	casedict['dct'] = list(set(casedict['dct']))
-	casedict['qmf'] = list(set(casedict['qmf']))
+	# casedict['fft'] = list(set(casedict['fft']))
+	# for x in ['fft_open', 'ifft_open', 'fft_is_ok', 'fft_close', 'ifft_close']:
+	# 	casedict['fft'].append(x)
+	# casedict['dct'] = list(set(casedict['dct']))
+	# casedict['qmf'] = list(set(casedict['qmf']))
 
-	length = 0
-	for v in casedict.values():
-		length += len(v)
-	print "There are %s high level operators in total" %length
+	# length = 0
+	# for v in casedict.values():
+	# 	length += len(v)
+	# print "There are %s high level operators in total" %length
 
-	# search_dict = {
-	# 				# 'AC4' : '/home/zxchen/zxchen_temp_workspace/cidk/Dolby_AC-4_Decoder_Imp/Test_Tools/work_transcode',
-	# 				'DAP' : '/home/zxchen/zxchen_temp_workspace/cidk/Dolby_Audio_Processing_Imp/Test_Tools/dap_cpdp_test/test/work',
-	# 				'Bacchus' : '/home/zxchen/zxchen_temp_workspace/cidk/Dolby_Digital_Plus_Decoder_Imp/Test_Tools/work'
-	# }
+	# # search_dict = {
+	# # 				# 'AC4' : '/home/zxchen/zxchen_temp_workspace/cidk/Dolby_AC-4_Decoder_Imp/Test_Tools/work_transcode',
+	# # 				'DAP' : '/home/zxchen/zxchen_temp_workspace/cidk/Dolby_Audio_Processing_Imp/Test_Tools/dap_cpdp_test/test/work',
+	# # 				'Bacchus' : '/home/zxchen/zxchen_temp_workspace/cidk/Dolby_Digital_Plus_Decoder_Imp/Test_Tools/work'
+	# # }
 
-	# for key, value in search_dict.items():
-	# 	df_low, df_high = getallDF(value, key)
+	# # for key, value in search_dict.items():
+	# # 	df_low, df_high = getallDF(value, key)
 
-	# 	print "%s use %s low level operators in total" % (key, \
-	# 		len(df_low['low_level_api'].values.tolist()))
-	# 	print "%s use %s high level operators in total" % (key, \
-	# 		len(df_high['high_level_api'].values.tolist()))
+	# # 	print "%s use %s low level operators in total" % (key, \
+	# # 		len(df_low['low_level_api'].values.tolist()))
+	# # 	print "%s use %s high level operators in total" % (key, \
+	# # 		len(df_high['high_level_api'].values.tolist()))
 
-	# 	csv_low = os.path.join(os.getcwd(), ('%s_low.csv') %key)
-	# 	csv_high = os.path.join(os.getcwd(), ('%s_high.csv') %key)
+	# # 	csv_low = os.path.join(os.getcwd(), ('%s_low.csv') %key)
+	# # 	csv_high = os.path.join(os.getcwd(), ('%s_high.csv') %key)
 
-	# 	df_low.to_csv(csv_low, columns=['low_level_api', 'total'], index=False)
-	# 	df_high.to_csv(csv_high, columns=['high_level_api', 'total'], index=False)
+	# # 	df_low.to_csv(csv_low, columns=['low_level_api', 'total'], index=False)
+	# # 	df_high.to_csv(csv_high, columns=['high_level_api', 'total'], index=False)
 
-	# 	fig = tls.make_subplots(rows=2, cols=1, subplot_titles=('Low_Level_Usage', 'High_Level_Usage'))
-	# 	fig.append_trace({'x' : df_low['low_level_api'], 'y' : df_low['total'], \
-	# 		'type' : 'bar', 'name' : 'Low_Level', 'marker': {"color": "#0F8C79"}}, 1, 1)
-	# 	fig.append_trace({'x' : df_high['high_level_api'], 'y' : df_high['total'], \
-	# 		'type' : 'bar', 'name' : 'High_Level', 'marker': {"color": "#0066FF"}}, 2, 1)
-	# 	fig['layout']['xaxis1'].update(title='Low_Level_APIs')
-	# 	fig['layout']['xaxis2'].update(title='High_Level_APIs')
-	# 	fig['layout']['yaxis1'].update(title='Total Usage')
-	# 	fig['layout']['yaxis2'].update(title='Total Usage')
-	# 	fig['layout'].update(title='Low/High Level APIs Usage')
-	# 	py.plot(fig, filename=('usage_%s.html') %key)
-
-
-	df1_high = pd.read_csv('AC4_high.csv')
-	df2_high = pd.read_csv('DAP_high.csv')
-	df3_high = pd.read_csv('Bacchus_high.csv')
-
-	caselist = []
-	for df in [df1_high, df2_high, df3_high]:
-		caselist.extend(df['high_level_api'].values.tolist())
-	caselist = list(set(caselist))
-
-	print "There are %s high level operators used in total" %len(caselist)
-
-	# df1_heatmap = updateDF(df1_high, caselist, 'AC4')
-	# df2_heatmap = updateDF(df2_high, caselist, 'DAP')
-	# df3_heatmap = updateDF(df3_high, caselist, 'Bacchus')
-
-	# pdb.set_trace()
-
-	# trace = {
-	# 			"y" : ['AC4', 'DAP', 'Bacchus'],
-	# 			"x" : df1_heatmap['high_level_api'].values.tolist(),
-	# 			"z" : [df1_heatmap['total'].values.tolist(), df2_heatmap['total'].values.tolist(), df3_heatmap['total'].values.tolist()],
-	# 			"type": "heatmap",
-	# 			"colorscale" : [[0, "rgb(255,0,0)"], [0.5, "rgb(255,100,0)"], \
-	# 			[1, "rgb(255,210,0)]"]],
-	# 			"reversescale": True
-	# }
-
-	# data = ([trace])
-
-	# layout = {
-	# 			"showlegend": False,
-	# 			"title" : \
-	# 			"High Level Operator Usages Comparison in AC4, DAP and Bacchus"
-	# }
-
-	# fig = Figure(data=data, layout=layout)
-	# py.plot(fig, filename='comparison_heatmap.html')
+	# # 	fig = tls.make_subplots(rows=2, cols=1, subplot_titles=('Low_Level_Usage', 'High_Level_Usage'))
+	# # 	fig.append_trace({'x' : df_low['low_level_api'], 'y' : df_low['total'], \
+	# # 		'type' : 'bar', 'name' : 'Low_Level', 'marker': {"color": "#0F8C79"}}, 1, 1)
+	# # 	fig.append_trace({'x' : df_high['high_level_api'], 'y' : df_high['total'], \
+	# # 		'type' : 'bar', 'name' : 'High_Level', 'marker': {"color": "#0066FF"}}, 2, 1)
+	# # 	fig['layout']['xaxis1'].update(title='Low_Level_APIs')
+	# # 	fig['layout']['xaxis2'].update(title='High_Level_APIs')
+	# # 	fig['layout']['yaxis1'].update(title='Total Usage')
+	# # 	fig['layout']['yaxis2'].update(title='Total Usage')
+	# # 	fig['layout'].update(title='Low/High Level APIs Usage')
+	# # 	py.plot(fig, filename=('usage_%s.html') %key)
 
 
-	caselist_diff = []
-	for key, value in casedict.items():
-		case_inter = list(set(value).intersection(set(caselist)))
-		caselist_diff.extend(case_inter)
-	casedict['blkvec'].extend(list(set(caselist) - set(caselist_diff)))
-	casedict['blkvec'].remove('LdivLL')
-	casedict['blkvec'].remove('LrecipI')
+	# df1_high = pd.read_csv('AC4_high.csv')
+	# df2_high = pd.read_csv('DAP_high.csv')
+	# df3_high = pd.read_csv('Bacchus_high.csv')
 
-	for key, value in casedict.items():
-		case_inter = list(set(value).intersection(set(caselist)))
-		print "There are %s high level operatos in %s in total" %(len(set(value)), key)
-		print "There are %s high level operators used in %s in total" %(len(case_inter), key)
+	# caselist = []
+	# for df in [df1_high, df2_high, df3_high]:
+	# 	caselist.extend(df['high_level_api'].values.tolist())
+	# caselist = list(set(caselist))
+
+	# print "There are %s high level operators used in total" %len(caselist)
+
+	# # df1_heatmap = updateDF(df1_high, caselist, 'AC4')
+	# # df2_heatmap = updateDF(df2_high, caselist, 'DAP')
+	# # df3_heatmap = updateDF(df3_high, caselist, 'Bacchus')
+
+	# # pdb.set_trace()
+
+	# # trace = {
+	# # 			"y" : ['AC4', 'DAP', 'Bacchus'],
+	# # 			"x" : df1_heatmap['high_level_api'].values.tolist(),
+	# # 			"z" : [df1_heatmap['total'].values.tolist(), df2_heatmap['total'].values.tolist(), df3_heatmap['total'].values.tolist()],
+	# # 			"type": "heatmap",
+	# # 			"colorscale" : [[0, "rgb(255,0,0)"], [0.5, "rgb(255,100,0)"], \
+	# # 			[1, "rgb(255,210,0)]"]],
+	# # 			"reversescale": True
+	# # }
+
+	# # data = ([trace])
+
+	# # layout = {
+	# # 			"showlegend": False,
+	# # 			"title" : \
+	# # 			"High Level Operator Usages Comparison in AC4, DAP and Bacchus"
+	# # }
+
+	# # fig = Figure(data=data, layout=layout)
+	# # py.plot(fig, filename='comparison_heatmap.html')
+
+
+	# caselist_diff = []
+	# for key, value in casedict.items():
+	# 	case_inter = list(set(value).intersection(set(caselist)))
+	# 	caselist_diff.extend(case_inter)
+	# casedict['blkvec'].extend(list(set(caselist) - set(caselist_diff)))
+	# casedict['blkvec'].remove('LdivLL')
+	# casedict['blkvec'].remove('LrecipI')
+
+	# for key, value in casedict.items():
+	# 	case_inter = list(set(value).intersection(set(caselist)))
+	# 	print "There are %s high level operatos in %s in total" %(len(set(value)), key)
+	# 	print "There are %s high level operators used in %s in total" %(len(case_inter), key)
 		
-		df1_heatmap, length1 = updateDF(df1_high, case_inter, 'AC4')
-		print "AC4 uses %s high level operators in %s" %(length1, key)
-		df2_heatmap, length2 = updateDF(df2_high, case_inter, 'DAP')
-		print "DAP uses %s high level operators in %s" %(length2, key)
-		df3_heatmap, length3 = updateDF(df3_high, case_inter, 'Bacchus')
-		print "Bacchus uses %s high level operators in %s" %(length3, key)
+	# 	df1_heatmap, length1 = updateDF(df1_high, case_inter, 'AC4')
+	# 	print "AC4 uses %s high level operators in %s" %(length1, key)
+	# 	df2_heatmap, length2 = updateDF(df2_high, case_inter, 'DAP')
+	# 	print "DAP uses %s high level operators in %s" %(length2, key)
+	# 	df3_heatmap, length3 = updateDF(df3_high, case_inter, 'Bacchus')
+	# 	print "Bacchus uses %s high level operators in %s" %(length3, key)
 		
-		# trace = {
-		# 			"y" : ['AC4', 'DAP', 'Bacchus'],
-		# 			"x" : df1_heatmap['high_level_api'].values.tolist(),
-		# 			"z" : [df1_heatmap['total'].values.tolist(), df2_heatmap['total'].values.tolist(), df3_heatmap['total'].values.tolist()],
-		# 			"type": "heatmap",
-		# 			"colorscale" : [[0, "rgb(230,0,0)"], [0.5, "rgb(255,210,0)"], [1, "rgb(255,255,255)]"]],
-		# 			"reversescale": True
-		# }
+	# 	# trace = {
+	# 	# 			"y" : ['AC4', 'DAP', 'Bacchus'],
+	# 	# 			"x" : df1_heatmap['high_level_api'].values.tolist(),
+	# 	# 			"z" : [df1_heatmap['total'].values.tolist(), df2_heatmap['total'].values.tolist(), df3_heatmap['total'].values.tolist()],
+	# 	# 			"type": "heatmap",
+	# 	# 			"colorscale" : [[0, "rgb(230,0,0)"], [0.5, "rgb(255,210,0)"], [1, "rgb(255,255,255)]"]],
+	# 	# 			"reversescale": True
+	# 	# }
 
-		# data = ([trace])
+	# 	# data = ([trace])
 
-		# layout = {
-		# 			"showlegend": False,
-		# 			"title" : \
-		# 			"High Level Operator Usages of %s Comparison in AC4, DAP and Bacchus" %key
-		# }
+	# 	# layout = {
+	# 	# 			"showlegend": False,
+	# 	# 			"title" : \
+	# 	# 			"High Level Operator Usages of %s Comparison in AC4, DAP and Bacchus" %key
+	# 	# }
 
-		# fig = Figure(data=data, layout=layout)
-		# py.plot(fig, filename=('comparison_heatmap_%s.html') %key)
+	# 	# fig = Figure(data=data, layout=layout)
+	# 	# py.plot(fig, filename=('comparison_heatmap_%s.html') %key)
 
 
-	# #################### Sending out Email Notifications ####################
+	# # #################### Sending out Email Notifications ####################
 
-	# print "Sending Email Notifications..."
+	# # print "Sending Email Notifications..."
 
-	# subject = '[Daily Report]::Dolby Intrinsics High/Low APIs Usage Monitor'
-	# content = 'See attached for details on DI low/high usage within DDP v4.9 GA, DAP v2.5.4 and AC4_Decoder v1.5.0'
-	# send_email('zxchen@dolby.com', subject, content, [], ['usage_ac4_v1.5.0.html', 'usage_udc_4.9.html', 'usage_dap_2.5.4.html'])
+	# # subject = '[Daily Report]::Dolby Intrinsics High/Low APIs Usage Monitor'
+	# # content = 'See attached for details on DI low/high usage within DDP v4.9 GA, DAP v2.5.4 and AC4_Decoder v1.5.0'
+	# # send_email('zxchen@dolby.com', subject, content, [], ['usage_ac4_v1.5.0.html', 'usage_udc_4.9.html', 'usage_dap_2.5.4.html'])
